@@ -35,7 +35,7 @@ pub async fn register(
     wrapped_privkey: &[u8],
 ) -> AppResult<User> {
     if users::find_by_username(pool, username).await?.is_some() {
-        return Err(AppError::Conflict("username already taken".into()));
+        return Err(AppError::conflict("username_taken", "username already taken"));
     }
 
     let id = Uuid::now_v7();

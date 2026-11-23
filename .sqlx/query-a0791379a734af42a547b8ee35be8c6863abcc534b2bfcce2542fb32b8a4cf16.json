@@ -1,0 +1,117 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO apps_data (id, app_id, type, format, encrypted_json, date, edited_at)\n        SELECT t.id, $1, t.type, t.format, t.encrypted_json, t.date, now()\n        FROM UNNEST($2::uuid[], $3::text[], $4::int2[], $5::bytea[], $6::timestamptz[])\n             AS t(id, type, format, encrypted_json, date)\n        ON CONFLICT (id) DO NOTHING\n        RETURNING id, app_id, type, format, encrypted_json, date, edited_at, version\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "app_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "app_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "type"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "format",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "format"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "encrypted_json",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "encrypted_json"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "date",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "date"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "edited_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "edited_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "TextArray",
+        "Int2Array",
+        "ByteaArray",
+        "TimestamptzArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a0791379a734af42a547b8ee35be8c6863abcc534b2bfcce2542fb32b8a4cf16"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO apps_data_tombstones (app_id, id, deleted_at) VALUES ($1, $2, now())\n        ON CONFLICT (app_id, id) DO UPDATE SET deleted_at = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "119678fbce8343a24a68f6e19a6a183a5d726462ad8857c6d53e7c9412e6b270"
+}

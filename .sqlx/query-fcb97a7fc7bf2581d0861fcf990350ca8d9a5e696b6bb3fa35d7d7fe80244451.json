@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM app_rotations WHERE app_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fcb97a7fc7bf2581d0861fcf990350ca8d9a5e696b6bb3fa35d7d7fe80244451"
+}

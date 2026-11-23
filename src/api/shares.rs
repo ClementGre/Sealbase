@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::api::bytes::B64;
 use crate::api::extractors::AuthUser;
 use crate::error::AppResult;
-use crate::models::AppAccess;
+use crate::models::{AppAccess, Member};
 use crate::repository::apps_access::PendingShare;
 use crate::service::shares as shares_service;
 use crate::state::AppState;
@@ -17,6 +17,8 @@ use crate::state::AppState;
 pub struct CreateShareRequest {
     pub recipient_user_id: Uuid,
     pub wrapped_dek: B64,
+    /// 'editor' (read + write) or 'viewer' (read-only, enforced server-side).
+    pub role: String,
 }
 
 #[derive(Serialize)]
@@ -56,18 +58,59 @@ pub async fn create(
         auth.user_id,
         body.recipient_user_id,
         &body.wrapped_dek.0,
+        &body.role,
     )
     .await?;
     Ok((StatusCode::CREATED, Json(access.into())))
+}
+
+#[derive(Serialize)]
+pub struct MemberResponse {
+    pub user_id: Uuid,
+    pub username: String,
+    pub public_key: B64,
+    pub role: String,
+    pub status: String,
+    pub last_edit_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<Member> for MemberResponse {
+    fn from(m: Member) -> Self {
+        MemberResponse {
+            user_id: m.user_id,
+            username: m.username,
+            public_key: m.public_key.into(),
+            role: m.role,
+            status: m.status,
+            last_edit_at: m.last_edit_at,
+            created_at: m.created_at,
+        }
+    }
 }
 
 pub async fn list(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(app_id): Path<Uuid>,
-) -> AppResult<Json<Vec<ShareResponse>>> {
-    let shares = shares_service::list_shares(state.pool(), app_id, auth.user_id).await?;
-    Ok(Json(shares.into_iter().map(ShareResponse::from).collect()))
+) -> AppResult<Json<Vec<MemberResponse>>> {
+    let members = shares_service::list_members(state.pool(), app_id, auth.user_id).await?;
+    Ok(Json(members.into_iter().map(MemberResponse::from).collect()))
+}
+
+#[derive(Deserialize)]
+pub struct SetRoleRequest {
+    pub role: String,
+}
+
+pub async fn set_role(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((app_id, user_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<SetRoleRequest>,
+) -> AppResult<Json<ShareResponse>> {
+    let access = shares_service::set_role(state.pool(), app_id, auth.user_id, user_id, &body.role).await?;
+    Ok(Json(access.into()))
 }
 
 #[derive(Serialize)]

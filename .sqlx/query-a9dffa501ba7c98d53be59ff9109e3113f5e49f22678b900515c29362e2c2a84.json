@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT d.id, d.version, r.expected_version AS \"expected_version?\"\n        FROM apps_data d\n        LEFT JOIN app_rotation_rows r ON r.rotation_id = $1 AND r.data_id = d.id\n        WHERE d.app_id = $2 AND (r.data_id IS NULL OR r.expected_version <> d.version)\n        ORDER BY d.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "expected_version?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "app_rotation_rows",
+            "name": "expected_version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a9dffa501ba7c98d53be59ff9109e3113f5e49f22678b900515c29362e2c2a84"
+}

@@ -1,0 +1,118 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE apps_data\n        SET encrypted_json = $4,\n            type = COALESCE($5, type),\n            format = COALESCE($6, format),\n            date = COALESCE($7, date),\n            version = version + 1,\n            edited_at = now()\n        WHERE app_id = $1 AND id = $2 AND version = $3\n        RETURNING id, app_id, type, format, encrypted_json, date, edited_at, version\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "app_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "app_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "type"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "format",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "format"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "encrypted_json",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "encrypted_json"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "date",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "date"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "edited_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "edited_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "apps_data",
+            "name": "version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Bytea",
+        "Text",
+        "Int2",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fbcb637d72b83ad8735c46fad5c9d2ad2034d765c9d13013b9a4ff34ce5d2cc3"
+}

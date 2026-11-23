@@ -21,9 +21,9 @@ use crate::state::AppState;
 /// else; generous for JSON-wrapped ciphertext but small enough to blunt
 /// memory-pressure abuse from authenticated clients.
 const DEFAULT_BODY_LIMIT: usize = 1024 * 1024; // 1 MiB
-/// Larger cap for app-level payloads that legitimately carry more: app
-/// creation/metadata and, above all, DEK rotation (which re-uploads every
-/// re-encrypted data row and access entry in a single request).
+/// Larger cap for payloads that legitimately carry many rows: app
+/// creation/metadata, data batches and staged-rotation chunks (each capped at
+/// `service::data::MAX_BATCH_OPS` rows).
 const LARGE_BODY_LIMIT: usize = 32 * 1024 * 1024; // 32 MiB
 
 fn cors_layer(origins: &CorsOrigins) -> CorsLayer {
@@ -73,12 +73,26 @@ pub fn router(state: AppState) -> Router {
                 .delete(apps::delete)
                 .layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
         )
+        .route("/apps/{id}/rotations", post(apps::begin_rotation))
         .route(
-            "/apps/{id}/rotate",
-            post(apps::rotate).layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
+            "/apps/{id}/rotations/{rotation_id}",
+            axum::routing::delete(apps::abort_rotation),
+        )
+        .route(
+            "/apps/{id}/rotations/{rotation_id}/rows",
+            post(apps::stage_rotation).layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
+        )
+        .route(
+            "/apps/{id}/rotations/{rotation_id}/commit",
+            post(apps::commit_rotation).layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
         )
         .route("/apps/{id}/leave", post(apps::leave))
         .route("/apps/{id}/data", get(data::list).post(data::create))
+        .route(
+            "/apps/{id}/data/batch",
+            post(data::batch).layer(DefaultBodyLimit::max(LARGE_BODY_LIMIT)),
+        )
+        .route("/apps/{id}/data/deleted", get(data::list_deleted))
         .route(
             "/apps/{id}/data/{data_id}",
             axum::routing::patch(data::patch).delete(data::delete),
@@ -87,7 +101,10 @@ pub fn router(state: AppState) -> Router {
         .route("/shares/pending", get(shares::list_pending))
         .route("/apps/{id}/shares/accept", post(shares::accept))
         .route("/apps/{id}/shares/decline", post(shares::decline))
-        .route("/apps/{id}/shares/{user_id}", axum::routing::delete(shares::remove_member))
+        .route(
+            "/apps/{id}/shares/{user_id}",
+            axum::routing::patch(shares::set_role).delete(shares::remove_member),
+        )
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
@@ -95,5 +112,5 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn health() -> impl IntoResponse {
-    Json(serde_json::json!({ "status": "healthy", "service": "sabf" }))
+    Json(serde_json::json!({ "status": "healthy", "service": "sealbase" }))
 }

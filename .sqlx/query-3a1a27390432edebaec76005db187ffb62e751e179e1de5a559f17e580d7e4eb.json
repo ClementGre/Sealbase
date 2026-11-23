@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE apps_data d\n        SET encrypted_json = r.encrypted_json, type = r.type, format = r.format\n        FROM app_rotation_rows r\n        WHERE r.rotation_id = $1 AND d.id = r.data_id AND d.app_id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3a1a27390432edebaec76005db187ffb62e751e179e1de5a559f17e580d7e4eb"
+}

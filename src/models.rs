@@ -1,4 +1,4 @@
-//! Row structs mirroring the schema in migrations/0001_init.sql.
+//! Row structs mirroring the schema in migrations/ (0001 + 0002).
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -37,6 +37,8 @@ pub struct App {
     pub owner_id: Uuid,
     pub slug: String,
     pub encrypted_metadata: Vec<u8>,
+    pub metadata_version: i64,
+    pub dek_version: i64,
     pub created_at: DateTime<Utc>,
 }
 
@@ -57,6 +59,8 @@ pub struct AppWithAccess {
     pub app_id: Uuid,
     pub slug: String,
     pub encrypted_metadata: Vec<u8>,
+    pub metadata_version: i64,
+    pub dek_version: i64,
     pub role: String,
     pub status: String,
     pub wrapped_dek: Vec<u8>,
@@ -69,7 +73,44 @@ pub struct AppData {
     pub id: Uuid,
     pub app_id: Uuid,
     pub r#type: String,
+    pub format: i16,
     pub encrypted_json: Vec<u8>,
-    pub created_at: DateTime<Utc>,
+    pub date: DateTime<Utc>,
     pub edited_at: DateTime<Utc>,
+    pub version: i64,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Tombstone {
+    pub id: Uuid,
+    pub deleted_at: DateTime<Utc>,
+}
+
+/// A membership row joined with the member's public identity — the shape
+/// `GET /apps/:id/shares` returns.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Member {
+    pub user_id: Uuid,
+    pub username: String,
+    pub public_key: Vec<u8>,
+    pub role: String,
+    pub status: String,
+    pub last_edit_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Roles, as stored in `apps_access.role`.
+pub mod role {
+    pub const OWNER: &str = "owner";
+    pub const EDITOR: &str = "editor";
+    pub const VIEWER: &str = "viewer";
+
+    pub fn can_write(role: &str) -> bool {
+        role == OWNER || role == EDITOR
+    }
+
+    /// Roles an owner may grant to someone else.
+    pub fn is_grantable(role: &str) -> bool {
+        role == EDITOR || role == VIEWER
+    }
 }

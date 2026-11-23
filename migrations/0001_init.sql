@@ -1,4 +1,4 @@
--- SABF v0.2 schema — see /app/SPEC.md §4 for design rationale.
+-- Sealbase v0.2 schema — see doc/SPEC.md §4 for design rationale.
 
 CREATE TABLE users (
     id                UUID PRIMARY KEY,                  -- UUIDv7

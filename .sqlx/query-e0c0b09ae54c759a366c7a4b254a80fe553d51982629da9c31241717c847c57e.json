@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM apps_access WHERE app_id = $1 AND NOT (user_id = ANY($2))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e0c0b09ae54c759a366c7a4b254a80fe553d51982629da9c31241717c847c57e"
+}

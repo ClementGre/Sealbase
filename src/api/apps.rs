@@ -1,6 +1,6 @@
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -9,6 +9,7 @@ use crate::api::bytes::B64;
 use crate::api::extractors::AuthUser;
 use crate::error::AppResult;
 use crate::models::AppWithAccess;
+use crate::repository::rotations::StagedRow;
 use crate::service::apps as apps_service;
 use crate::state::AppState;
 
@@ -17,6 +18,8 @@ pub struct AppResponse {
     pub app_id: Uuid,
     pub slug: String,
     pub encrypted_metadata: B64,
+    pub metadata_version: i64,
+    pub dek_version: i64,
     pub role: String,
     pub status: String,
     pub wrapped_dek: B64,
@@ -29,6 +32,8 @@ impl From<AppWithAccess> for AppResponse {
             app_id: a.app_id,
             slug: a.slug,
             encrypted_metadata: a.encrypted_metadata.into(),
+            metadata_version: a.metadata_version,
+            dek_version: a.dek_version,
             role: a.role,
             status: a.status,
             wrapped_dek: a.wrapped_dek.into(),
@@ -88,6 +93,13 @@ pub async fn get(
 #[derive(Deserialize)]
 pub struct PatchAppRequest {
     pub encrypted_metadata: B64,
+    pub expected_version: i64,
+    pub dek_version: i64,
+}
+
+#[derive(Serialize)]
+pub struct PatchAppResponse {
+    pub metadata_version: i64,
 }
 
 pub async fn patch(
@@ -95,9 +107,17 @@ pub async fn patch(
     auth: AuthUser,
     Path(app_id): Path<Uuid>,
     Json(body): Json<PatchAppRequest>,
-) -> AppResult<StatusCode> {
-    apps_service::patch_metadata(state.pool(), app_id, auth.user_id, &body.encrypted_metadata.0).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> AppResult<Json<PatchAppResponse>> {
+    let metadata_version = apps_service::patch_metadata(
+        state.pool(),
+        app_id,
+        auth.user_id,
+        &body.encrypted_metadata.0,
+        body.expected_version,
+        body.dek_version,
+    )
+    .await?;
+    Ok(Json(PatchAppResponse { metadata_version }))
 }
 
 pub async fn delete(
@@ -118,55 +138,112 @@ pub async fn leave(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Deserialize)]
-pub struct RotateDataItem {
-    pub id: Uuid,
-    pub new_encrypted_json: B64,
+// --- staged rotation (SPEC.md §3.1) -----------------------------------------
+
+#[derive(Serialize)]
+pub struct RotationResponse {
+    pub rotation_id: Uuid,
+    pub base_dek_version: i64,
+    pub started_at: DateTime<Utc>,
 }
 
-#[derive(Deserialize)]
-pub struct RotateAccessItem {
-    pub user_id: Uuid,
-    pub new_wrapped_dek: B64,
-}
-
-#[derive(Deserialize)]
-pub struct RotateRequest {
-    pub new_encrypted_metadata: B64,
-    pub data: Vec<RotateDataItem>,
-    pub access: Vec<RotateAccessItem>,
-}
-
-pub async fn rotate(
+pub async fn begin_rotation(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(app_id): Path<Uuid>,
-    Json(body): Json<RotateRequest>,
+) -> AppResult<(StatusCode, Json<RotationResponse>)> {
+    let r = apps_service::begin_rotation(state.pool(), app_id, auth.user_id).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(RotationResponse {
+            rotation_id: r.rotation_id,
+            base_dek_version: r.base_dek_version,
+            started_at: r.started_at,
+        }),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct StagedRowItem {
+    pub id: Uuid,
+    pub expected_version: i64,
+    pub r#type: String,
+    pub format: i16,
+    pub encrypted_json: B64,
+}
+
+#[derive(Deserialize)]
+pub struct StageRequest {
+    pub rows: Vec<StagedRowItem>,
+}
+
+pub async fn stage_rotation(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((app_id, rotation_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<StageRequest>,
 ) -> AppResult<StatusCode> {
-    let data = body
-        .data
+    let rows = body
+        .rows
         .into_iter()
-        .map(|d| apps_service::RotateDataItem {
-            id: d.id,
-            new_encrypted_json: d.new_encrypted_json.0,
+        .map(|r| StagedRow {
+            data_id: r.id,
+            expected_version: r.expected_version,
+            r#type: r.r#type,
+            format: r.format,
+            encrypted_json: r.encrypted_json.0,
         })
         .collect();
-    let access = body
-        .access
-        .into_iter()
-        .map(|a| apps_service::RotateAccessItem {
-            user_id: a.user_id,
-            new_wrapped_dek: a.new_wrapped_dek.0,
-        })
-        .collect();
-    apps_service::rotate(
+    apps_service::stage_rotation_rows(state.pool(), app_id, auth.user_id, rotation_id, rows).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct AccessItem {
+    pub user_id: Uuid,
+    pub wrapped_dek: B64,
+}
+
+#[derive(Deserialize)]
+pub struct CommitRequest {
+    pub encrypted_metadata: B64,
+    pub expected_metadata_version: i64,
+    /// Every member who keeps access, pending invitees included, each with
+    /// the new DEK sealed to them. Members left out are removed.
+    pub access: Vec<AccessItem>,
+}
+
+#[derive(Serialize)]
+pub struct CommitResponse {
+    pub metadata_version: i64,
+    pub dek_version: i64,
+}
+
+pub async fn commit_rotation(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((app_id, rotation_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<CommitRequest>,
+) -> AppResult<Json<CommitResponse>> {
+    let access = body.access.into_iter().map(|a| (a.user_id, a.wrapped_dek.0)).collect();
+    let r = apps_service::commit_rotation(
         state.pool(),
         app_id,
         auth.user_id,
-        &body.new_encrypted_metadata.0,
-        data,
+        rotation_id,
+        &body.encrypted_metadata.0,
+        body.expected_metadata_version,
         access,
     )
     .await?;
+    Ok(Json(CommitResponse { metadata_version: r.metadata_version, dek_version: r.dek_version }))
+}
+
+pub async fn abort_rotation(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((app_id, rotation_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    apps_service::abort_rotation(state.pool(), app_id, auth.user_id, rotation_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

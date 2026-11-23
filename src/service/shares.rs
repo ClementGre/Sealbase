@@ -2,9 +2,25 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
-use crate::models::AppAccess;
-use crate::repository::{apps, apps_access, audit, users};
+use crate::models::{AppAccess, Member, role};
 use crate::repository::apps_access::PendingShare;
+use crate::repository::{apps, apps_access, audit, users};
+
+async fn require_owner(pool: &PgPool, app_id: Uuid, owner_id: Uuid) -> AppResult<()> {
+    let app = apps::find_by_id(pool, app_id).await?.ok_or(AppError::NotFound)?;
+    if app.owner_id != owner_id {
+        return Err(AppError::Forbidden);
+    }
+    Ok(())
+}
+
+fn check_grantable(r: &str) -> AppResult<()> {
+    if role::is_grantable(r) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest("role must be 'editor' or 'viewer'".into()))
+    }
+}
 
 pub async fn create_share(
     pool: &PgPool,
@@ -12,33 +28,53 @@ pub async fn create_share(
     owner_id: Uuid,
     recipient_user_id: Uuid,
     wrapped_dek: &[u8],
+    share_role: &str,
 ) -> AppResult<AppAccess> {
-    let app = apps::find_by_id(pool, app_id).await?.ok_or(AppError::NotFound)?;
-    if app.owner_id != owner_id {
-        return Err(AppError::Forbidden);
-    }
+    check_grantable(share_role)?;
+    require_owner(pool, app_id, owner_id).await?;
     if users::find_by_id(pool, recipient_user_id).await?.is_none() {
         return Err(AppError::BadRequest("recipient user does not exist".into()));
     }
     if apps_access::find(pool, app_id, recipient_user_id).await?.is_some() {
-        return Err(AppError::Conflict(
-            "recipient already has access or a pending invite".into(),
+        return Err(AppError::conflict(
+            "already_member",
+            "recipient already has access or a pending invite",
         ));
     }
 
     let mut tx = pool.begin().await?;
-    let access = apps_access::create(&mut tx, app_id, recipient_user_id, wrapped_dek, "member", "pending").await?;
+    let access = apps_access::create(&mut tx, app_id, recipient_user_id, wrapped_dek, share_role, "pending").await?;
     audit::log(&mut *tx, Some(owner_id), "share", Some(app_id), Some(recipient_user_id)).await?;
     tx.commit().await?;
     Ok(access)
 }
 
-pub async fn list_shares(pool: &PgPool, app_id: Uuid, owner_id: Uuid) -> AppResult<Vec<AppAccess>> {
-    let app = apps::find_by_id(pool, app_id).await?.ok_or(AppError::NotFound)?;
-    if app.owner_id != owner_id {
-        return Err(AppError::Forbidden);
+pub async fn list_members(pool: &PgPool, app_id: Uuid, owner_id: Uuid) -> AppResult<Vec<Member>> {
+    require_owner(pool, app_id, owner_id).await?;
+    Ok(apps_access::list_members(pool, app_id).await?)
+}
+
+/// Changes a member's role (editor <-> viewer). Takes effect on their next
+/// request: read-only is a server-side permission, not a key change.
+pub async fn set_role(
+    pool: &PgPool,
+    app_id: Uuid,
+    owner_id: Uuid,
+    target_user_id: Uuid,
+    new_role: &str,
+) -> AppResult<AppAccess> {
+    check_grantable(new_role)?;
+    require_owner(pool, app_id, owner_id).await?;
+    if target_user_id == owner_id {
+        return Err(AppError::BadRequest("the owner's role cannot be changed".into()));
     }
-    Ok(apps_access::list_for_app(pool, app_id).await?)
+    let mut tx = pool.begin().await?;
+    let access = apps_access::set_role(&mut *tx, app_id, target_user_id, new_role)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    audit::log(&mut *tx, Some(owner_id), "role.change", Some(app_id), Some(target_user_id)).await?;
+    tx.commit().await?;
+    Ok(access)
 }
 
 pub async fn list_pending_for_user(pool: &PgPool, user_id: Uuid) -> AppResult<Vec<PendingShare>> {
@@ -76,10 +112,7 @@ pub async fn remove_member(
     owner_id: Uuid,
     target_user_id: Uuid,
 ) -> AppResult<()> {
-    let app = apps::find_by_id(pool, app_id).await?.ok_or(AppError::NotFound)?;
-    if app.owner_id != owner_id {
-        return Err(AppError::Forbidden);
-    }
+    require_owner(pool, app_id, owner_id).await?;
     if target_user_id == owner_id {
         return Err(AppError::BadRequest("the owner cannot remove their own access row".into()));
     }

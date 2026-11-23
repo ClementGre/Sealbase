@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT dek_version FROM apps WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "dek_version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "apps",
+            "name": "dek_version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "56b49aad69be61a3ada23271e1c2b998683e2d06f8e5929905a922ae7d583d98"
+}

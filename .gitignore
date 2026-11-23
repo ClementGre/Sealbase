@@ -3,3 +3,7 @@
 .env
 .idea
 .claude
+
+# npm workspaces (client lib + example)
+node_modules
+.DS_Store

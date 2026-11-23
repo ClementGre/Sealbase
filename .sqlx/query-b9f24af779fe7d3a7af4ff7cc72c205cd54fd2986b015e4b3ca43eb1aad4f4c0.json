@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE apps SET encrypted_metadata = $2, metadata_version = metadata_version + 1\n        WHERE id = $1 AND metadata_version = $3 AND dek_version = $4\n        RETURNING metadata_version\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "metadata_version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "apps",
+            "name": "metadata_version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b9f24af779fe7d3a7af4ff7cc72c205cd54fd2986b015e4b3ca43eb1aad4f4c0"
+}

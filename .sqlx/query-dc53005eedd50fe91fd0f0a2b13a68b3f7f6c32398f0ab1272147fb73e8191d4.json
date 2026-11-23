@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO app_rotation_rows (rotation_id, data_id, expected_version, type, format, encrypted_json)\n        SELECT $1, t.data_id, t.expected_version, t.type, t.format, t.encrypted_json\n        FROM UNNEST($2::uuid[], $3::int8[], $4::text[], $5::int2[], $6::bytea[])\n             AS t(data_id, expected_version, type, format, encrypted_json)\n        ON CONFLICT (rotation_id, data_id) DO UPDATE\n        SET expected_version = EXCLUDED.expected_version,\n            type = EXCLUDED.type,\n            format = EXCLUDED.format,\n            encrypted_json = EXCLUDED.encrypted_json\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "Int8Array",
+        "TextArray",
+        "Int2Array",
+        "ByteaArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dc53005eedd50fe91fd0f0a2b13a68b3f7f6c32398f0ab1272147fb73e8191d4"
+}

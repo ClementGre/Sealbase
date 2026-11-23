@@ -2,151 +2,259 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::AppData;
+use crate::models::{AppData, Tombstone};
 
-pub async fn create(
-    executor: impl sqlx::PgExecutor<'_>,
-    id: Uuid,
-    app_id: Uuid,
-    r#type: &str,
-    encrypted_json: &[u8],
-    created_at: DateTime<Utc>,
-) -> sqlx::Result<AppData> {
-    // `created_at` is client-supplied (SPEC.md §5); `edited_at` starts equal to
-    // it (never edited yet) and is server-managed from then on.
+pub struct NewRow {
+    pub id: Uuid,
+    pub r#type: String,
+    pub format: i16,
+    pub encrypted_json: Vec<u8>,
+    pub date: DateTime<Utc>,
+}
+
+/// Bulk insert with `ON CONFLICT (id) DO NOTHING`. Returns only the rows that
+/// were actually inserted; the caller decides what a skipped id means.
+/// `date` is client-supplied (SPEC.md §5); `edited_at` is always server time,
+/// so a backdated row still shows up in an `edited_from` sync.
+pub async fn insert_many(tx: &mut sqlx::PgConnection, app_id: Uuid, rows: &[NewRow]) -> sqlx::Result<Vec<AppData>> {
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let types: Vec<String> = rows.iter().map(|r| r.r#type.clone()).collect();
+    let formats: Vec<i16> = rows.iter().map(|r| r.format).collect();
+    let blobs: Vec<Vec<u8>> = rows.iter().map(|r| r.encrypted_json.clone()).collect();
+    let dates: Vec<DateTime<Utc>> = rows.iter().map(|r| r.date).collect();
     sqlx::query_as!(
         AppData,
         r#"
-        INSERT INTO apps_data (id, app_id, type, encrypted_json, created_at, edited_at)
-        VALUES ($1, $2, $3, $4, $5, $5)
-        RETURNING id, app_id, type, encrypted_json, created_at, edited_at
+        INSERT INTO apps_data (id, app_id, type, format, encrypted_json, date, edited_at)
+        SELECT t.id, $1, t.type, t.format, t.encrypted_json, t.date, now()
+        FROM UNNEST($2::uuid[], $3::text[], $4::int2[], $5::bytea[], $6::timestamptz[])
+             AS t(id, type, format, encrypted_json, date)
+        ON CONFLICT (id) DO NOTHING
+        RETURNING id, app_id, type, format, encrypted_json, date, edited_at, version
         "#,
-        id,
         app_id,
-        r#type,
-        encrypted_json,
-        created_at,
+        &ids,
+        &types,
+        &formats,
+        &blobs,
+        &dates,
     )
-    .fetch_one(executor)
+    .fetch_all(tx)
     .await
 }
 
-pub async fn update(
-    executor: impl sqlx::PgExecutor<'_>,
-    app_id: Uuid,
-    data_id: Uuid,
-    encrypted_json: &[u8],
-    created_at: Option<DateTime<Utc>>,
-) -> sqlx::Result<Option<AppData>> {
-    // `created_at` is client-controlled: overwrite it when supplied, keep it
-    // otherwise. `edited_at` is always bumped to server time.
-    sqlx::query_as!(
-        AppData,
-        r#"
-        UPDATE apps_data
-        SET encrypted_json = $3, created_at = COALESCE($4, created_at), edited_at = now()
-        WHERE app_id = $1 AND id = $2
-        RETURNING id, app_id, type, encrypted_json, created_at, edited_at
-        "#,
-        app_id,
-        data_id,
-        encrypted_json,
-        created_at,
-    )
-    .fetch_optional(executor)
-    .await
-}
-
-pub async fn delete(executor: impl sqlx::PgExecutor<'_>, app_id: Uuid, data_id: Uuid) -> sqlx::Result<u64> {
-    let result = sqlx::query!(
-        "DELETE FROM apps_data WHERE app_id = $1 AND id = $2",
-        app_id,
-        data_id,
-    )
-    .execute(executor)
-    .await?;
-    Ok(result.rows_affected())
-}
-
-pub struct ListFilters<'a> {
-    pub r#type: Option<&'a str>,
-    pub created_from: Option<DateTime<Utc>>,
-    pub created_to: Option<DateTime<Utc>>,
-    pub edited_from: Option<DateTime<Utc>>,
-    pub edited_to: Option<DateTime<Utc>>,
-    pub cursor: Option<(DateTime<Utc>, Uuid)>,
-    pub limit: i64,
-}
-
-pub async fn list(
-    pool: &PgPool,
-    app_id: Uuid,
-    filters: &ListFilters<'_>,
-) -> sqlx::Result<Vec<AppData>> {
-    let (cursor_created_at, cursor_id) = match filters.cursor {
-        Some((created_at, id)) => (Some(created_at), Some(id)),
-        None => (None, None),
-    };
-    sqlx::query_as!(
-        AppData,
-        r#"
-        SELECT id, app_id, type, encrypted_json, created_at, edited_at
-        FROM apps_data
-        WHERE app_id = $1
-          AND ($2::text IS NULL OR type = $2)
-          AND ($3::timestamptz IS NULL OR created_at >= $3)
-          AND ($4::timestamptz IS NULL OR created_at <= $4)
-          AND ($5::timestamptz IS NULL OR edited_at >= $5)
-          AND ($6::timestamptz IS NULL OR edited_at <= $6)
-          AND ($7::timestamptz IS NULL OR (created_at, id) > ($7, $8))
-        ORDER BY created_at, id
-        LIMIT $9
-        "#,
-        app_id,
-        filters.r#type,
-        filters.created_from,
-        filters.created_to,
-        filters.edited_from,
-        filters.edited_to,
-        cursor_created_at,
-        cursor_id,
-        filters.limit,
-    )
-    .fetch_all(pool)
-    .await
-}
-
-/// Locks every current data row of an app (`FOR UPDATE`) and returns their
-/// ids. Used at the start of a rotation transaction (SPEC.md §3.1) so that
-/// concurrent PATCH/DELETE of these rows block until the rotation commits, and
-/// the caller can detect a mismatch between the row set it re-encrypted and the
-/// set that actually exists (a concurrent insert) before overwriting anything.
-pub async fn lock_ids_for_app(tx: &mut sqlx::PgConnection, app_id: Uuid) -> sqlx::Result<Vec<Uuid>> {
+/// Which of `ids` exist in this app (used to tell a same-app duplicate, which
+/// `on_conflict: "skip"` tolerates, from an id taken by another app).
+pub async fn existing_ids(tx: &mut sqlx::PgConnection, app_id: Uuid, ids: &[Uuid]) -> sqlx::Result<Vec<Uuid>> {
     let rows = sqlx::query!(
-        "SELECT id FROM apps_data WHERE app_id = $1 FOR UPDATE",
+        "SELECT id FROM apps_data WHERE app_id = $1 AND id = ANY($2)",
         app_id,
+        ids,
     )
     .fetch_all(tx)
     .await?;
     Ok(rows.into_iter().map(|r| r.id).collect())
 }
 
-/// Overwrites ciphertext in place during rotation (SPEC.md §3.1).
-/// `edited_at`/`created_at` are intentionally left untouched: re-encryption
-/// under a new DEK is not a content edit.
-pub async fn replace_ciphertext_for_rotate(
-    tx: &mut sqlx::PgConnection,
-    app_id: Uuid,
-    data_id: Uuid,
-    encrypted_json: &[u8],
-) -> sqlx::Result<u64> {
-    let result = sqlx::query!(
-        "UPDATE apps_data SET encrypted_json = $3 WHERE app_id = $1 AND id = $2",
+/// A re-created id is alive again: drop its tombstone.
+pub async fn clear_tombstones(tx: &mut sqlx::PgConnection, app_id: Uuid, ids: &[Uuid]) -> sqlx::Result<()> {
+    sqlx::query!(
+        "DELETE FROM apps_data_tombstones WHERE app_id = $1 AND id = ANY($2)",
         app_id,
-        data_id,
-        encrypted_json,
+        ids,
     )
     .execute(tx)
     .await?;
-    Ok(result.rows_affected())
+    Ok(())
+}
+
+pub struct RowUpdate {
+    pub id: Uuid,
+    pub expected_version: i64,
+    pub encrypted_json: Vec<u8>,
+    pub r#type: Option<String>,
+    pub format: Option<i16>,
+    pub date: Option<DateTime<Utc>>,
+}
+
+/// Compare-and-swap update. `None` means either the row doesn't exist or its
+/// version moved on; `current_version` tells the two apart.
+pub async fn update_cas(tx: &mut sqlx::PgConnection, app_id: Uuid, u: &RowUpdate) -> sqlx::Result<Option<AppData>> {
+    sqlx::query_as!(
+        AppData,
+        r#"
+        UPDATE apps_data
+        SET encrypted_json = $4,
+            type = COALESCE($5, type),
+            format = COALESCE($6, format),
+            date = COALESCE($7, date),
+            version = version + 1,
+            edited_at = now()
+        WHERE app_id = $1 AND id = $2 AND version = $3
+        RETURNING id, app_id, type, format, encrypted_json, date, edited_at, version
+        "#,
+        app_id,
+        u.id,
+        u.expected_version,
+        u.encrypted_json,
+        u.r#type,
+        u.format,
+        u.date,
+    )
+    .fetch_optional(tx)
+    .await
+}
+
+pub async fn current_version(tx: &mut sqlx::PgConnection, app_id: Uuid, id: Uuid) -> sqlx::Result<Option<i64>> {
+    let row = sqlx::query!("SELECT version FROM apps_data WHERE app_id = $1 AND id = $2", app_id, id)
+        .fetch_optional(tx)
+        .await?;
+    Ok(row.map(|r| r.version))
+}
+
+/// Compare-and-swap delete that leaves a tombstone. Returns false if the row
+/// doesn't exist or its version moved on.
+pub async fn delete_cas(tx: &mut sqlx::PgConnection, app_id: Uuid, id: Uuid, expected_version: i64) -> sqlx::Result<bool> {
+    let deleted = sqlx::query!(
+        "DELETE FROM apps_data WHERE app_id = $1 AND id = $2 AND version = $3 RETURNING id",
+        app_id,
+        id,
+        expected_version,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if deleted.is_none() {
+        return Ok(false);
+    }
+    sqlx::query!(
+        r#"
+        INSERT INTO apps_data_tombstones (app_id, id, deleted_at) VALUES ($1, $2, now())
+        ON CONFLICT (app_id, id) DO UPDATE SET deleted_at = now()
+        "#,
+        app_id,
+        id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    Ok(true)
+}
+
+pub struct ListFilters<'a> {
+    pub types: Option<&'a [String]>,
+    pub format: Option<i16>,
+    pub date_from: Option<DateTime<Utc>>,
+    pub date_to: Option<DateTime<Utc>>,
+    pub edited_from: Option<DateTime<Utc>>,
+    pub edited_to: Option<DateTime<Utc>>,
+    /// Keyset cursor on the active sort key: (date or edited_at, id).
+    pub cursor: Option<(DateTime<Utc>, Uuid)>,
+    pub limit: i64,
+}
+
+/// Rows ordered by `(date, id)` — the natural order for reading.
+pub async fn list_by_date(pool: &PgPool, app_id: Uuid, f: &ListFilters<'_>) -> sqlx::Result<Vec<AppData>> {
+    let (cursor_key, cursor_id) = split_cursor(f.cursor);
+    sqlx::query_as!(
+        AppData,
+        r#"
+        SELECT id, app_id, type, format, encrypted_json, date, edited_at, version
+        FROM apps_data
+        WHERE app_id = $1
+          AND ($2::text[] IS NULL OR type = ANY($2))
+          AND ($3::int2 IS NULL OR format = $3)
+          AND ($4::timestamptz IS NULL OR date >= $4)
+          AND ($5::timestamptz IS NULL OR date <= $5)
+          AND ($6::timestamptz IS NULL OR edited_at >= $6)
+          AND ($7::timestamptz IS NULL OR edited_at <= $7)
+          AND ($8::timestamptz IS NULL OR (date, id) > ($8, $9))
+        ORDER BY date, id
+        LIMIT $10
+        "#,
+        app_id,
+        f.types,
+        f.format,
+        f.date_from,
+        f.date_to,
+        f.edited_from,
+        f.edited_to,
+        cursor_key,
+        cursor_id,
+        f.limit,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Rows ordered by `(edited_at, id)` — the order an incremental sync walks.
+pub async fn list_by_edited(pool: &PgPool, app_id: Uuid, f: &ListFilters<'_>) -> sqlx::Result<Vec<AppData>> {
+    let (cursor_key, cursor_id) = split_cursor(f.cursor);
+    sqlx::query_as!(
+        AppData,
+        r#"
+        SELECT id, app_id, type, format, encrypted_json, date, edited_at, version
+        FROM apps_data
+        WHERE app_id = $1
+          AND ($2::text[] IS NULL OR type = ANY($2))
+          AND ($3::int2 IS NULL OR format = $3)
+          AND ($4::timestamptz IS NULL OR date >= $4)
+          AND ($5::timestamptz IS NULL OR date <= $5)
+          AND ($6::timestamptz IS NULL OR edited_at >= $6)
+          AND ($7::timestamptz IS NULL OR edited_at <= $7)
+          AND ($8::timestamptz IS NULL OR (edited_at, id) > ($8, $9))
+        ORDER BY edited_at, id
+        LIMIT $10
+        "#,
+        app_id,
+        f.types,
+        f.format,
+        f.date_from,
+        f.date_to,
+        f.edited_from,
+        f.edited_to,
+        cursor_key,
+        cursor_id,
+        f.limit,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+fn split_cursor(cursor: Option<(DateTime<Utc>, Uuid)>) -> (Option<DateTime<Utc>>, Option<Uuid>) {
+    match cursor {
+        Some((key, id)) => (Some(key), Some(id)),
+        None => (None, None),
+    }
+}
+
+pub async fn list_tombstones(
+    pool: &PgPool,
+    app_id: Uuid,
+    since: Option<DateTime<Utc>>,
+    cursor: Option<(DateTime<Utc>, Uuid)>,
+    limit: i64,
+) -> sqlx::Result<Vec<Tombstone>> {
+    let (cursor_key, cursor_id) = split_cursor(cursor);
+    sqlx::query_as!(
+        Tombstone,
+        r#"
+        SELECT id, deleted_at FROM apps_data_tombstones
+        WHERE app_id = $1
+          AND ($2::timestamptz IS NULL OR deleted_at >= $2)
+          AND ($3::timestamptz IS NULL OR (deleted_at, id) > ($3, $4))
+        ORDER BY deleted_at, id
+        LIMIT $5
+        "#,
+        app_id,
+        since,
+        cursor_key,
+        cursor_id,
+        limit,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn server_now(pool: &PgPool) -> sqlx::Result<DateTime<Utc>> {
+    let row = sqlx::query!(r#"SELECT now() AS "now!""#).fetch_one(pool).await?;
+    Ok(row.now)
 }

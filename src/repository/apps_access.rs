@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::AppAccess;
+use crate::models::{AppAccess, Member};
 
 pub async fn create(
     tx: &mut sqlx::PgConnection,
@@ -30,7 +30,7 @@ pub async fn create(
 }
 
 pub async fn find(
-    pool: &PgPool,
+    executor: impl sqlx::PgExecutor<'_>,
     app_id: Uuid,
     user_id: Uuid,
 ) -> sqlx::Result<Option<AppAccess>> {
@@ -43,11 +43,11 @@ pub async fn find(
         app_id,
         user_id,
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
 }
 
-pub async fn list_for_app(pool: &PgPool, app_id: Uuid) -> sqlx::Result<Vec<AppAccess>> {
+pub async fn list_for_app(executor: impl sqlx::PgExecutor<'_>, app_id: Uuid) -> sqlx::Result<Vec<AppAccess>> {
     sqlx::query_as!(
         AppAccess,
         r#"
@@ -57,7 +57,47 @@ pub async fn list_for_app(pool: &PgPool, app_id: Uuid) -> sqlx::Result<Vec<AppAc
         "#,
         app_id,
     )
+    .fetch_all(executor)
+    .await
+}
+
+/// Every membership row of an app joined with the member's username and
+/// public key, so the owner can show and re-seal to members without an extra
+/// lookup per user.
+pub async fn list_members(pool: &PgPool, app_id: Uuid) -> sqlx::Result<Vec<Member>> {
+    sqlx::query_as!(
+        Member,
+        r#"
+        SELECT aa.user_id, u.username, u.public_key, aa.role, aa.status, aa.last_edit_at, aa.created_at
+        FROM apps_access aa
+        JOIN users u ON u.id = aa.user_id
+        WHERE aa.app_id = $1
+        ORDER BY aa.created_at
+        "#,
+        app_id,
+    )
     .fetch_all(pool)
+    .await
+}
+
+pub async fn set_role(
+    executor: impl sqlx::PgExecutor<'_>,
+    app_id: Uuid,
+    user_id: Uuid,
+    role: &str,
+) -> sqlx::Result<Option<AppAccess>> {
+    sqlx::query_as!(
+        AppAccess,
+        r#"
+        UPDATE apps_access SET role = $3
+        WHERE app_id = $1 AND user_id = $2 AND role <> 'owner'
+        RETURNING app_id, user_id, wrapped_dek, role, status, last_edit_at, created_at
+        "#,
+        app_id,
+        user_id,
+        role,
+    )
+    .fetch_optional(executor)
     .await
 }
 
@@ -138,29 +178,29 @@ pub async fn bump_last_edit(
     Ok(())
 }
 
-/// Replaces the full access set for an app within a rotation transaction
-/// (SPEC.md §3.1): deletes all rows, inserts exactly the submitted set. The
-/// owner's row is re-created with role='owner'; everyone else is 'member'.
-pub async fn replace_for_rotate(
+/// Applies a rotation's access list (SPEC.md §3.1) in place: re-seals the new
+/// DEK for every listed member and drops every member not listed. Role,
+/// status (pending stays pending) and `last_edit_at` are preserved — rotation
+/// changes keys, never permissions.
+pub async fn apply_rotation(
     tx: &mut sqlx::PgConnection,
     app_id: Uuid,
-    owner_id: Uuid,
     access: &[(Uuid, Vec<u8>)],
 ) -> sqlx::Result<()> {
-    sqlx::query!("DELETE FROM apps_access WHERE app_id = $1", app_id)
-        .execute(&mut *tx)
-        .await?;
+    let keep: Vec<Uuid> = access.iter().map(|(id, _)| *id).collect();
+    sqlx::query!(
+        "DELETE FROM apps_access WHERE app_id = $1 AND NOT (user_id = ANY($2))",
+        app_id,
+        &keep,
+    )
+    .execute(&mut *tx)
+    .await?;
     for (user_id, wrapped_dek) in access {
-        let role = if *user_id == owner_id { "owner" } else { "member" };
         sqlx::query!(
-            r#"
-            INSERT INTO apps_access (app_id, user_id, wrapped_dek, role, status)
-            VALUES ($1, $2, $3, $4, 'active')
-            "#,
+            "UPDATE apps_access SET wrapped_dek = $3 WHERE app_id = $1 AND user_id = $2",
             app_id,
             user_id,
             wrapped_dek,
-            role,
         )
         .execute(&mut *tx)
         .await?;

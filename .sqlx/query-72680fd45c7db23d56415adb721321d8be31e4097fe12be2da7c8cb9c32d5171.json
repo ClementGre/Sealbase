@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT dek_version FROM apps WHERE id = $1 FOR SHARE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "dek_version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "apps",
+            "name": "dek_version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "72680fd45c7db23d56415adb721321d8be31e4097fe12be2da7c8cb9c32d5171"
+}

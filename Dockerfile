@@ -30,14 +30,14 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/sabf /usr/local/bin/sabf
+COPY --from=builder /app/target/release/sealbase /usr/local/bin/sealbase
 
-RUN useradd -m -u 1000 sabf
-USER sabf
+RUN useradd -m -u 1000 sealbase
+USER sealbase
 EXPOSE 80
 HEALTHCHECK --interval=10s --timeout=3s --start-period=2s --retries=3 \
     CMD curl -f http://localhost:${PORT:-80}/health || exit 1
-CMD ["sabf"]
+CMD ["sealbase"]
 
 # ---- dev (source mounted at runtime, cargo run on start) ----
 # Usage: build with --target dev, mount ./src, Cargo.toml, Cargo.lock as volumes.
@@ -48,4 +48,4 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /v
 EXPOSE 80
 HEALTHCHECK --interval=10s --timeout=3s --start-period=120s --retries=3 \
     CMD addr="${LISTEN_ADDR:-0.0.0.0:80}"; curl -f http://localhost:${addr##*:}/health || exit 1
-CMD ["cargo", "run", "-p", "sabf"]
+CMD ["cargo", "run", "-p", "sealbase"]

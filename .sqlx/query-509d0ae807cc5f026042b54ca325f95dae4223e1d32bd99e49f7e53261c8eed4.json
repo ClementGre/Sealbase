@@ -1,0 +1,103 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO apps (id, owner_id, slug, encrypted_metadata)\n        VALUES ($1, $2, $3, $4)\n        RETURNING id, owner_id, slug, encrypted_metadata, metadata_version, dek_version, created_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "apps",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "owner_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "apps",
+            "name": "owner_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "slug",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "apps",
+            "name": "slug"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "encrypted_metadata",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "apps",
+            "name": "encrypted_metadata"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "metadata_version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "apps",
+            "name": "metadata_version"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "dek_version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "apps",
+            "name": "dek_version"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "apps",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "509d0ae807cc5f026042b54ca325f95dae4223e1d32bd99e49f7e53261c8eed4"
+}

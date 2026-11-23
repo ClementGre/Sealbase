@@ -1,114 +1,136 @@
-# SABF implementation notes
+# Sealbase implementation notes
 
 This document covers the parts of the implementation that aren't dictated by
 [SPEC.md](SPEC.md): module layout, wire format, and decisions the spec left
 to the implementer.
 
-## Module layout
+## Repository layout
+
+```
+src/           Rust backend (crate `sealbase`)
+migrations/    0001_init.sql (v0.2, never edit: sqlx checksums applied migrations)
+               0002_sealbase_v03.sql (in-place upgrade to v0.3)
+client/        `sealbase-client`, the TypeScript client lib (npm package)
+example/vue/   Vue example app built on the lib
+doc/           SPEC.md (protocol) + this file
+package.json   npm workspace root (client + example)
+```
+
+## Backend modules
 
 ```
 src/
-  main.rs          entry point: env/config load, DB pool, migrations, router, serve
-  config.rs        Config::from_env() — all runtime env vars in one place
-  error.rs         AppError -> HTTP status/JSON mapping
-  state.rs         AppState (pool + config + login rate limiter), Arc-shared
-  crypto.rs         server-side crypto only (see below)
-  models.rs        sqlx::FromRow row structs mirroring the schema
-  repository.rs    + repository/{users,sessions,apps,apps_access,apps_data,audit}.rs
-                     one file per table, sqlx::query!/query_as! only (compile-time checked)
-  service.rs       + service/{auth,users,apps,data,shares,rate_limiter}.rs
-                     business logic: multi-step transactions, authorization checks
-  api.rs           + api/{auth,users,apps,data,shares,extractors,bytes}.rs
-                     axum handlers, request/response DTOs, router assembly
-migrations/
-  0001_init.sql    single migration, schema verbatim from SPEC.md §4
+  main.rs          entry point: env/config, DB pool, migrations, router, serve
+  config.rs        Config::from_env(): all runtime env vars in one place
+  error.rs         AppError -> HTTP status/JSON; 409s carry a `code` (+ details);
+                     unique violations (23505) map to 409 `duplicate_id`
+  state.rs         AppState (pool + config + login rate limiter)
+  crypto.rs        server-side crypto only (Argon2id verifier, JWTs, refresh tokens)
+  models.rs        row structs + `role` helpers (can_write, is_grantable)
+  repository/      one file per table, sqlx::query!/query_as! only (compile-time checked)
+    apps.rs          incl. the FOR SHARE / FOR UPDATE locks on the app row
+    apps_access.rs   memberships, roles, rotation's in-place re-seal
+    apps_data.rs     UNNEST bulk insert, CAS update/delete + tombstones, listings
+    rotations.rs     staged rotation: staging rows, mismatch check, apply
+  service/         business logic: transactions and authorization
+    data.rs          `apply_batch`: the one write path for data (single-row
+                       endpoints are 1-op batches)
+    apps.rs          apps, metadata CAS, staged rotation
+    shares.rs        sharing and roles
+  api/             axum handlers, request/response DTOs, router assembly
 ```
 
-`repository` functions take either `&PgPool` or a generic `impl PgExecutor<'_>`
-(the latter when the service layer needs to run them inside a transaction
-alongside other writes — e.g. app creation, metadata PATCH + last_edit_at
-bump, and DEK rotation).
+`repository` functions take `&PgPool`, `&mut PgConnection` or a generic
+`impl PgExecutor<'_>` when the service needs them inside a transaction.
 
-## crypto.rs — what the server actually does
+## Write path and locking
 
-Per SPEC.md §1, the server is ciphertext-blind: it never sees a DEK, UMK,
-private key, or passphrase-derived key. That means `crypto.rs` does **not**
-contain XChaCha20-Poly1305 or X25519 sealed-box code — there's nothing for
-the server to encrypt or decrypt. What's left:
+Every data write is a batch (`service::data::apply_batch`), in one transaction:
 
-- `hash_auth_key` / `verify_auth_key` — the server-side Argon2id verifier
-  (`auth_hash = Argon2id(auth_key, auth_salt)`, SPEC.md §3).
-- `current_kdf_params` — the fixed, framework-wide Argon2id cost constants
-  handed to clients for their own passphrase stretching (SPEC.md §7).
-- `encode_access_token` / `decode_access_token` — HS256 JWTs.
-- `generate_refresh_token` / `hash_refresh_token` — opaque refresh tokens,
-  stored only as a SHA-256 hash.
+1. membership check (owner/editor, active);
+2. `SELECT dek_version FROM apps … FOR SHARE`, compared with the request's;
+3. creates via one `INSERT … SELECT FROM UNNEST(…) ON CONFLICT (id) DO NOTHING
+   RETURNING …`, then a lookup to tell same-app duplicates (skippable) from ids
+   taken by another app (always an error);
+4. updates/deletes as `… WHERE id = $ AND version = $expected`; misses are
+   collected and reported together as one `version_conflict`;
+5. `last_edit_at` bump, commit.
+
+Rotation commit takes the same app row `FOR UPDATE`, so it serializes against all
+writes without locking data rows. Metadata PATCH is a single CAS `UPDATE … WHERE
+metadata_version = $ AND dek_version = $`.
 
 ## Wire format
 
-All binary fields (ciphertext, keys, sealed boxes) are standard base64
-strings in JSON, via the `api::bytes::B64` newtype
-(`Serialize`/`Deserialize` wrapping `Vec<u8>`). Timestamps are RFC 3339
-(`chrono::DateTime<Utc>`'s default serde format).
+Binary fields (ciphertext, keys, sealed boxes) are standard padded base64 in JSON
+(`api::bytes::B64`). Timestamps are RFC 3339.
+
+`GET /apps/:id/data` parses its query string by hand (`serde_urlencoded` into
+pairs) because `type` may repeat. Unknown parameters are a 400, so typos don't
+silently widen a query.
 
 ## Pagination cursor
 
-SPEC.md §5 specifies keyset pagination on `(created_at, id)` with an opaque
-`cursor`. This implementation encodes the cursor as
-`base64url(json({"created_at": ..., "id": ...}))` — opaque to clients as
-required, but human-inspectable for debugging. `GET /apps/:id/data` returns
-`next_cursor` (null once the page is short of `limit`) so clients don't have
-to compute it themselves.
-
-Because `created_at` is client-controlled and editable (SPEC.md §5), it is not
-guaranteed monotonic with `id`. That doesn't affect the cursor: `(created_at,
-id)` is still a total order, so the keyset walk stays correct — a client that
-backdates or moves an entry's `created_at` just changes where that row sorts,
-exactly as intended.
+Opaque to clients: `base64url(json({"o": order, "k": key, "id": id}))`, where
+`o` is `date`, `edited` or `deleted` and `k` is the sort key of the last row. A
+cursor used with a different `order` is rejected. `next_cursor` is null once a
+page is short of `limit`.
 
 ## CORS
 
-`api::router` attaches a `tower_http::cors::CorsLayer` built from
-`config.cors_allowed_origins` (`CORS_ALLOWED_ORIGINS` env var, `config.rs`):
-either `*` (any origin, via `AllowOrigin::any()`) or a comma-separated exact
-origin list (`AllowOrigin::list(...)`). Allowed methods are
-GET/POST/PATCH/DELETE/OPTIONS; allowed headers are `authorization` and
-`content-type` (all this API needs — auth is bearer-token, not cookie-based,
-so no `allow_credentials`). If unset, the list is empty and no cross-origin
-requests are permitted.
+`CORS_ALLOWED_ORIGINS`: `*` or a comma-separated exact list; methods
+GET/POST/PATCH/DELETE/OPTIONS, headers `authorization` and `content-type`. No
+credentials (bearer auth, not cookies). Unset = no cross-origin requests.
 
 ## Login rate limiting
 
-In-memory sliding-window counter (`service::rate_limiter::RateLimiter`),
-keyed separately by `user:<username>` and `ip:<addr>` (SPEC.md §7). This is
-single-instance only, which matches the self-hosted deployment model the
-spec assumes; it resets on restart and does not coordinate across replicas.
+In-memory sliding window keyed by `user:<username>` and `ip:<addr>`;
+single-instance, resets on restart.
 
 ## Refresh token reuse detection
 
-A session row is created per login/refresh with an optional `parent_id`
-pointing at the session it rotated from. Presenting a refresh token whose
-session is already `revoked_at IS NOT NULL` (either because it was rotated
-away or explicitly logged out) revokes the **entire** lineage — walked via a
-recursive CTE over `parent_id` in both directions — per SPEC.md §6.
+Each login/refresh creates a session row with `parent_id`. Presenting a token
+whose session is already revoked revokes the entire lineage (recursive CTE in
+both directions).
 
 ## Account/app deletion
 
-`DELETE /users/me` and `DELETE /apps/:id` do essentially no manual cascade
-logic in Rust: the schema's `ON DELETE CASCADE` foreign keys handle
-sessions, owned apps, their `apps_data`/`apps_access` rows, and the
-deleted user's own access rows on apps they don't own. The service layer's
-job is just the passphrase/ownership check before issuing the `DELETE`.
+Handled by `ON DELETE CASCADE` (sessions, owned apps and their data, access
+rows, tombstones, staged rotations). The service only checks the passphrase or
+ownership first.
+
+## Client lib (`client/`)
+
+```
+src/
+  crypto.ts    libsodium primitives, AAD, blind tags, deterministic ids
+  http.ts      fetch wrapper: bearer auth, single-flight refresh on 401, SealbaseError
+  wire.ts      typed raw endpoints (field names as on the wire)
+  session.ts   register/login/unlock/lock/logout/change passphrase; keys in memory only
+  storage.ts   session persistence (localStorage-shaped)
+  cache.ts     CacheStore: IndexedDB (one DB per user) or memory; rows kept as ciphertext
+  app.ts       AppHandle: metadata, data, cache sync, members, rotation, migration
+  client.ts    createClient(): apps, invites, per-slug cache settings
+```
+
+Caching: the handle keeps the server's rows verbatim (ciphertext) in the store
+and decrypts in memory with a memo keyed on `(dek_version, version, edited_at)`.
+A query is served from the cache when its `from` is inside the retention window
+(or retention is unlimited); otherwise it goes to the server. The first sync
+fills the window ordered by date; later ones fetch rows edited and ids deleted
+since the last `server_time` minus a two-minute overlap, merging by
+`(edited_at, version)`. A changed `dek_version` or retention setting clears the
+app's cache. On sign-out the user's cache database is deleted.
 
 ## Running locally
 
 ```
-docker compose up -d           # postgres, per compose.yaml
-cp .env.example .env           # already done in this repo; edit JWT_SECRET etc.
-sqlx migrate run               # applies migrations/0001_init.sql
+docker compose up -d postgres  # per compose.yaml
+cp .env.example .env           # edit JWT_SECRET etc.
+sqlx migrate run
 cargo run
 ```
 
-`sqlx::query!`/`query_as!` are compile-time checked against a live database
-(`DATABASE_URL` from `.env`, loaded by `dotenvy` at both build and run time),
-so the Postgres container needs to be up before `cargo build`.
+`sqlx::query!` is compile-time checked against a live database (`DATABASE_URL`),
+or against `.sqlx/` with `SQLX_OFFLINE=true` (as in the Dockerfile). After
+changing a query, run `cargo sqlx prepare` and commit `.sqlx/`.
