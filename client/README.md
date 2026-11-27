@@ -37,6 +37,37 @@ const app = await client.createApp('finance', { name: 'Household' })
 
 There is **no passphrase recovery**: tell your users.
 
+## Calling your own backend
+
+If your app has its own API next to Sealbase, authenticate requests with the
+user's Sealbase access token as a Bearer token:
+
+```js
+async function callApi(path, init = {}) {
+  const send = (token) =>
+    fetch(path, { ...init, headers: { ...init.headers, authorization: `Bearer ${token}` } })
+
+  let token = await client.session.getAccessToken()
+  if (!token) throw new Error('signed out')
+  let res = await send(token)
+  if (res.status === 401) {
+    token = await client.session.getAccessToken({ refresh: true })
+    if (token) res = await send(token)
+  }
+  return res
+}
+```
+
+`getAccessToken()` returns the current token, or `null` when signed out. It
+works while the session is `locked` (the token is saved, the keys are not), so
+it carries no access to encrypted data. Access tokens are short-lived: on a
+401, `getAccessToken({ refresh: true })` rotates the refresh token and returns
+a new access token. Concurrent refreshes, yours and the client's own, share one
+request. If the refresh fails, the session signs out and you get `null`.
+
+The token is a credential: send it only over HTTPS, and never log it or put it
+in a URL.
+
 ## Data
 
 Each app holds entries: `{ id, type, data, date, editedAt, version }`.

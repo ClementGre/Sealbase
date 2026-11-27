@@ -1,6 +1,6 @@
 {
   "name": "sealbase-client",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Browser/Node client for a Sealbase backend: zero-knowledge auth, encrypted per-app storage, sharing, caching.",
   "license": "GPL-3.0-only",
   "type": "module",

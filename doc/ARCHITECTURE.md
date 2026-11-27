@@ -106,7 +106,8 @@ src/
   crypto.ts    libsodium primitives, AAD, blind tags, deterministic ids
   http.ts      fetch wrapper: bearer auth, single-flight refresh on 401, SealbaseError
   wire.ts      typed raw endpoints (field names as on the wire)
-  session.ts   register/login/unlock/lock/logout/change passphrase; keys in memory only
+  session.ts   register/login/unlock/lock/logout/change passphrase, access token
+               for your own backend; keys in memory only
   storage.ts   session persistence (localStorage-shaped)
   cache.ts     CacheStore: IndexedDB (one DB per user) or memory; rows kept as ciphertext
   app.ts       AppHandle: metadata, data, cache sync, members, rotation, migration

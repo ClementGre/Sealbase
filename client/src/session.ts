@@ -56,12 +56,34 @@ export class Session {
   ) {
     api.http.setAuth({
       getAccessToken: () => this.persisted?.accessToken ?? null,
-      refresh: () => {
-        if (!this.persisted?.refreshToken) return Promise.resolve(null)
-        if (!this.refreshInFlight) this.refreshInFlight = this.doRefresh().finally(() => (this.refreshInFlight = null))
-        return this.refreshInFlight
-      },
+      refresh: () => this.refreshAccessToken(),
     })
+  }
+
+  /** Single-flight refresh shared by the HTTP layer and `getAccessToken`. */
+  private refreshAccessToken(): Promise<string | null> {
+    if (!this.persisted?.refreshToken) return Promise.resolve(null)
+    if (!this.refreshInFlight) this.refreshInFlight = this.doRefresh().finally(() => (this.refreshInFlight = null))
+    return this.refreshInFlight
+  }
+
+  /**
+   * The user's current access token, to call your own backend with
+   * `Authorization: Bearer <token>` (it can verify it against Sealbase).
+   *
+   * Available whenever a session exists, `locked` included: the token is
+   * persisted, the keys are not. Returns `null` when signed out.
+   *
+   * Pass `{ refresh: true }` after your backend answered 401: the session
+   * swaps its refresh token for a new pair (rotating it, single-flight with
+   * the client's own refreshes) and returns the new access token. If the
+   * refresh token is rejected, the session signs out and this returns `null`.
+   *
+   * Treat the token as a credential: don't log it or put it in URLs.
+   */
+  async getAccessToken(opts: { refresh?: boolean } = {}): Promise<string | null> {
+    if (opts.refresh) return this.refreshAccessToken()
+    return this.persisted?.accessToken ?? null
   }
 
   get current(): Readonly<SessionState> {
